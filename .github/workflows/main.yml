@@ -1,0 +1,368 @@
+name: Build LemonLoader GC-Fix Installer APK
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  INSTALLER_COMMIT: ac443fce9f2ef890caddf8c64bba9194a43361bd
+  JNISHARP_COMMIT: 630d276174bd03bae951fe6b01762d31029c7835
+  BASE_MELON_VERSION: 0.6.5.1
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install build tools
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git curl unzip zip python3
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Install MAUI Android workload
+        shell: bash
+        run: |
+          dotnet workload install maui-android
+
+      - name: Clone LemonLoader Installer
+        shell: bash
+        run: |
+          git clone https://github.com/LemonLoader/MelonLoaderInstaller.git installer
+          cd installer
+          git checkout "$INSTALLER_COMMIT"
+
+      - name: Build fixed JNISharp
+        shell: bash
+        run: |
+          git clone https://github.com/LemonLoader/JNISharp.git jnisharp
+          cd jnisharp
+          git checkout "$JNISHARP_COMMIT"
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("JNISharp/JNISharp.csproj")
+          s = p.read_text(encoding="utf-8-sig")
+
+          old = "<TargetFramework>net35</TargetFramework>"
+          if old not in s:
+              raise SystemExit("Expected net35 TargetFramework not found")
+
+          s = s.replace(
+              old,
+              "<TargetFramework>net8.0</TargetFramework>"
+          )
+
+          p.write_text(s, encoding="utf-8")
+          PY
+
+          dotnet build JNISharp/JNISharp.csproj -c Release
+
+          test -f \
+          JNISharp/bin/Release/net8.0/JNISharp.dll
+
+      - name: Build GC-fix melon_data
+        shell: bash
+        run: |
+          curl -fL \
+            --retry 5 \
+            --retry-delay 2 \
+            "https://github.com/LemonLoader/MelonLoader/releases/download/${BASE_MELON_VERSION}/melon_data.zip" \
+            -o melon_data_official.zip
+
+          mkdir melon_repack
+          cd melon_repack
+
+          unzip -q ../melon_data_official.zip
+
+          OLD="$(find . -type f -iname JNISharp.dll | head -n 1)"
+
+          if [ -z "$OLD" ]; then
+            echo "JNISharp.dll not found in melon_data"
+            exit 1
+          fi
+
+          echo "Old JNISharp:"
+          echo "$OLD"
+
+          cp \
+            "$OLD" \
+            "$OLD.official_${BASE_MELON_VERSION}.bak"
+
+          cp \
+            ../jnisharp/JNISharp/bin/Release/net8.0/JNISharp.dll \
+            "$OLD"
+
+          cat > COMMUNITY_BUILD_INFO.txt <<EOF
+          LemonLoader Community GC-Fix
+          Base melon_data: official LemonLoader ${BASE_MELON_VERSION}
+          JNISharp fix commit: ${JNISHARP_COMMIT}
+          Purpose: JNI reference disposal / garbage collection fix
+          This is NOT an official LemonLoader release.
+          EOF
+
+          zip -qr ../melon_data_gcfix.zip .
+
+      - name: Patch installer to use bundled GC-fix
+        shell: bash
+        run: |
+          cp \
+            melon_data_gcfix.zip \
+            installer/App/Resources/Raw/melon_data_gcfix.zip
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path("installer")
+
+          runner = root / "App/Utils/PatchRunner.cs"
+          csproj = root / "App/MelonLoader.Installer.App.csproj"
+
+          s = runner.read_text(encoding="utf-8-sig")
+
+          needle = (
+              "    private static async Task<bool> "
+              "DownloadMelonData(string destination)"
+          )
+
+          start = s.find(needle)
+
+          if start < 0:
+              raise SystemExit(
+                  "DownloadMelonData() not found"
+              )
+
+          next_method = s.find(
+              "\n    private static async Task",
+              start + len(needle)
+          )
+
+          if next_method < 0:
+              raise SystemExit(
+                  "Could not locate end of DownloadMelonData()"
+              )
+
+          new_method = """    private static async Task<bool> DownloadMelonData(string destination)
+              {
+                  _logger?.Log("Using bundled MelonLoader GC-Fix data");
+
+                  try
+                  {
+                      await using Stream source =
+                          await FileSystem.OpenAppPackageFileAsync(
+                              "melon_data_gcfix.zip"
+                          );
+
+                      await using FileStream target =
+                          File.Create(destination);
+
+                      await source.CopyToAsync(target);
+                      await target.FlushAsync();
+
+                      _logger?.Log(
+                          "Bundled GC-Fix melon_data copied successfully"
+                      );
+
+                      return true;
+                  }
+                  catch (Exception ex)
+                  {
+                      _logger?.Log(
+                          "Failed to copy bundled GC-Fix melon_data.\\n"
+                          + ex
+                      );
+
+                      return false;
+                  }
+              }
+          """
+
+          s = (
+              s[:start]
+              + new_method
+              + s[next_method:]
+          )
+
+          runner.write_text(
+              s,
+              encoding="utf-8"
+          )
+
+          p = csproj.read_text(
+              encoding="utf-8-sig"
+          )
+
+          p = p.replace(
+              "com.lavagang.melonloader.installer.app",
+              "com.community.lemonloader.installer.gcfix"
+          )
+
+          p = p.replace(
+              "com.lavagang.melonloader.installer",
+              "com.community.lemonloader.installer.gcfix"
+          )
+
+          p = p.replace(
+              "<ApplicationTitle>MelonLoader.Installer.App</ApplicationTitle>",
+              "<ApplicationTitle>LemonLoader GC Fix</ApplicationTitle>"
+          )
+
+          p = p.replace(
+              "<ApplicationTitle>MelonLoader Installer</ApplicationTitle>",
+              "<ApplicationTitle>LemonLoader GC Fix</ApplicationTitle>"
+          )
+
+          p = p.replace(
+              "<ApplicationDisplayVersion>1.0.0</ApplicationDisplayVersion>",
+              "<ApplicationDisplayVersion>1.0.1</ApplicationDisplayVersion>"
+          )
+
+          p = p.replace(
+              "<ApplicationVersion>1</ApplicationVersion>",
+              "<ApplicationVersion>2</ApplicationVersion>"
+          )
+
+          csproj.write_text(
+              p,
+              encoding="utf-8"
+          )
+
+          asset = (
+              root
+              / "App"
+              / "Resources"
+              / "Raw"
+              / "melon_data_gcfix.zip"
+          )
+
+          if not asset.is_file():
+              raise SystemExit(
+                  "Embedded melon_data_gcfix.zip missing"
+              )
+
+          print("Installer patched successfully")
+          PY
+
+      - name: Generate signing key
+        shell: bash
+        run: |
+          keytool \
+            -genkeypair \
+            -v \
+            -keystore community.keystore \
+            -storepass android \
+            -keypass android \
+            -alias lemon-gcfix \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=LemonLoader GC Fix Community, OU=Community Build, O=Community, L=Internet, S=NA, C=US"
+
+      - name: Restore installer
+        shell: bash
+        working-directory: installer
+        run: |
+          dotnet restore \
+            App/MelonLoader.Installer.App.csproj
+
+      - name: Build signed APK
+        shell: bash
+        working-directory: installer
+        run: |
+          dotnet publish \
+            App/MelonLoader.Installer.App.csproj \
+            -f net8.0-android \
+            -c Release \
+            -p:AndroidPackageFormat=apk \
+            -p:RunAOTCompilation=false \
+            -p:AndroidKeyStore=true \
+            -p:AndroidSigningKeyStore="${GITHUB_WORKSPACE}/community.keystore" \
+            -p:AndroidSigningStorePass=android \
+            -p:AndroidSigningKeyAlias=lemon-gcfix \
+            -p:AndroidSigningKeyPass=android
+
+      - name: Collect output
+        shell: bash
+        run: |
+          mkdir -p out
+
+          APK="$(
+            find installer/App/bin/Release \
+              -type f \
+              -name '*-Signed.apk' \
+              | head -n 1
+          )"
+
+          if [ -z "$APK" ]; then
+            APK="$(
+              find installer/App/bin/Release \
+                -type f \
+                -name '*.apk' \
+                | head -n 1
+            )"
+          fi
+
+          if [ -z "$APK" ]; then
+            echo "APK not found"
+            exit 1
+          fi
+
+          echo "APK found:"
+          echo "$APK"
+
+          cp \
+            "$APK" \
+            out/LemonLoader_GCFix_Installer_Community.apk
+
+          sha256sum \
+            out/LemonLoader_GCFix_Installer_Community.apk \
+            > out/LemonLoader_GCFix_Installer_Community.apk.sha256
+
+          cat > out/BUILD_INFO.txt <<EOF
+          LemonLoader GC-Fix Installer
+          Community Test Build
+
+          Installer source:
+          ${INSTALLER_COMMIT}
+
+          Base melon_data:
+          LemonLoader ${BASE_MELON_VERSION}
+
+          JNISharp GC fix:
+          ${JNISHARP_COMMIT}
+
+          Package:
+          com.community.lemonloader.installer.gcfix
+
+          This is NOT an official LemonLoader release.
+          EOF
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: LemonLoader-GCFix-Installer-Community
+          path: out/*
+          if-no-files-found: error
