@@ -21,6 +21,9 @@ jobs:
     timeout-minutes: 45
 
     steps:
+      - name: Checkout builder repo
+        uses: actions/checkout@v4
+        
       - name: Setup .NET 8
         uses: actions/setup-dotnet@v4
         with:
@@ -73,27 +76,7 @@ jobs:
           cd installer
           git checkout "$INSTALLER_COMMIT"
 
-      - name: Force China Unity dependencies for Tale of Immortal
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
 
-          p = Path("installer/Core/PatchSteps/DownloadUnityDeps.cs")
-          s = p.read_text(encoding="utf-8-sig")
-
-          old = """string url = patcher.Args.UnityVersion.Value.Type == AssetRipper.Primitives.UnityVersionType.China ? CHINA_LIBUNITY_URL_TEMPLATE : LIBUNITY_URL_TEMPLATE;"""
-
-          new = """string url = CHINA_LIBUNITY_URL_TEMPLATE;"""
-
-          if old not in s:
-              raise SystemExit("Unity dependency selector not found")
-
-          s = s.replace(old, new)
-
-          p.write_text(s, encoding="utf-8")
-          print("Forced China Unity dependencies")
-          PY
 
       - name: Build fixed JNISharp as net35
         shell: bash
@@ -312,6 +295,96 @@ jobs:
               )
 
           print("Installer patched successfully")
+          PY
+          
+      - name: Bundle exact Tale of Immortal Unity f2c1
+        shell: bash
+        run: |
+          echo "efc71c8f3371f25a32f30bc237929d893f34897af79f3a783710837722e7cb10  UnityDeps_2022.3.62f2c1_arm64-v8a.zip" \
+            | sha256sum -c -
+
+          cp \
+            UnityDeps_2022.3.62f2c1_arm64-v8a.zip \
+            installer/App/Resources/Raw/unitydeps_toi_f2c1.zip
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("installer/App/Utils/PatchRunner.cs")
+          s = p.read_text(encoding="utf-8-sig")
+
+          old_call = "await PrepareAssets(localUnityDepsPath);"
+          new_call = "await PrepareAssets(localUnityDepsPath, data.PackageName);"
+
+          if old_call not in s:
+              raise SystemExit("PrepareAssets call not found")
+
+          s = s.replace(old_call, new_call, 1)
+
+          old_sig = (
+              "private static async Task PrepareAssets("
+              "string? localUnityDepsPath)"
+          )
+
+          new_sig = (
+              "private static async Task PrepareAssets("
+              "string? localUnityDepsPath, string packageName)"
+          )
+
+          if old_sig not in s:
+              raise SystemExit("PrepareAssets signature not found")
+
+          s = s.replace(old_sig, new_sig, 1)
+
+          old_block = '''        if (localUnityDepsPath != null && File.Exists(localUnityDepsPath))
+                  {
+                      File.Copy(localUnityDepsPath, _unityDepsPath);
+                      _logger?.Log("Local dependencies provided; copied");
+                  }
+
+                  _logger?.Log("Downloading MelonLoader data");'''
+
+          new_block = '''        if (localUnityDepsPath != null && File.Exists(localUnityDepsPath))
+                  {
+                      File.Copy(localUnityDepsPath, _unityDepsPath);
+                      _logger?.Log("Local dependencies provided; copied");
+                  }
+                  else if (packageName == "com.guigugame.guigubahuangoverseas")
+                  {
+                      _logger?.Log("Using bundled Tale of Immortal Unity 2022.3.62f2c1");
+
+                      await using Stream source =
+                          await FileSystem.OpenAppPackageFileAsync(
+                              "unitydeps_toi_f2c1.zip"
+                          );
+
+                      await using FileStream target =
+                          File.Create(_unityDepsPath);
+
+                      await source.CopyToAsync(target);
+                      await target.FlushAsync();
+
+                      _logger?.Log("Exact Unity f2c1 dependencies ready");
+                  }
+
+                  _logger?.Log("Downloading MelonLoader data");'''
+
+          if old_block not in s:
+              raise SystemExit("PrepareAssets dependency block not found")
+
+          s = s.replace(old_block, new_block, 1)
+
+          p.write_text(s, encoding="utf-8")
+
+          asset = Path(
+              "installer/App/Resources/Raw/"
+              "unitydeps_toi_f2c1.zip"
+          )
+
+          if not asset.is_file():
+              raise SystemExit("Bundled f2c1 dependency missing")
+
+          print("Tale of Immortal exact Unity f2c1 enabled")
           PY
 
       - name: Generate signing key
