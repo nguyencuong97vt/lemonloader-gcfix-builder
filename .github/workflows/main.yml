@@ -156,6 +156,205 @@ jobs:
           EOF
 
           zip -qr ../melon_data_gcfix.zip .
+      - name: Force Tale of Immortal Unity version in MelonLoader
+        shell: bash
+        run: |
+          set -e
+
+          echo "Extracting GC-fix melon_data..."
+
+          rm -rf melon_force_unity
+          mkdir melon_force_unity
+
+          unzip -q melon_data_gcfix.zip -d melon_force_unity
+
+          MELON_DLL="$(
+            find melon_force_unity \
+              -type f \
+              -path '*/MelonLoader/net8/MelonLoader.dll' \
+              | head -n 1
+          )"
+
+          if [ -z "$MELON_DLL" ]; then
+            echo "ERROR: net8 MelonLoader.dll not found"
+            exit 1
+          fi
+
+          echo "MelonLoader.dll:"
+          echo "$MELON_DLL"
+
+          rm -rf unity_version_patcher
+          mkdir unity_version_patcher
+
+          cat > unity_version_patcher/unity_version_patcher.csproj <<'EOF'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup>
+              <OutputType>Exe</OutputType>
+              <TargetFramework>net8.0</TargetFramework>
+              <ImplicitUsings>enable</ImplicitUsings>
+              <Nullable>enable</Nullable>
+            </PropertyGroup>
+
+            <ItemGroup>
+              <PackageReference Include="Mono.Cecil"
+                                Version="0.11.5" />
+            </ItemGroup>
+          </Project>
+          EOF
+
+          cat > unity_version_patcher/Program.cs <<'EOF'
+          using Mono.Cecil;
+          using Mono.Cecil.Cil;
+
+          if (args.Length != 1)
+          {
+              Console.Error.WriteLine(
+                  "Usage: unity_version_patcher <MelonLoader.dll>"
+              );
+              return 1;
+          }
+
+          const string ForcedVersion = "2022.3.62f2c1";
+
+          string dllPath = args[0];
+
+          var assembly = AssemblyDefinition.ReadAssembly(
+              dllPath,
+              new ReaderParameters
+              {
+                  ReadSymbols = false,
+                  InMemory = true
+              }
+          );
+
+          var launchOptions =
+              assembly.MainModule.Types.FirstOrDefault(
+                  t => t.FullName == "MelonLoader.MelonLaunchOptions"
+              );
+
+          if (launchOptions == null)
+              throw new Exception(
+                  "MelonLaunchOptions type not found"
+              );
+
+          var core =
+              launchOptions.NestedTypes.FirstOrDefault(
+                  t => t.Name == "Core"
+              );
+
+          if (core == null)
+              throw new Exception(
+                  "MelonLaunchOptions.Core not found"
+              );
+
+          var unityVersionField =
+              core.Fields.FirstOrDefault(
+                  f => f.Name ==
+                       "<UnityVersion>k__BackingField"
+              );
+
+          if (unityVersionField == null)
+              throw new Exception(
+                  "UnityVersion backing field not found"
+              );
+
+          var cctor =
+              core.Methods.FirstOrDefault(
+                  m => m.Name == ".cctor"
+              );
+
+          if (cctor == null)
+          {
+              cctor = new MethodDefinition(
+                  ".cctor",
+                  MethodAttributes.Private |
+                  MethodAttributes.Static |
+                  MethodAttributes.HideBySig |
+                  MethodAttributes.SpecialName |
+                  MethodAttributes.RTSpecialName,
+                  assembly.MainModule.TypeSystem.Void
+              );
+
+              core.Methods.Add(cctor);
+
+              cctor.Body.Instructions.Add(
+                  Instruction.Create(
+                      OpCodes.Ldstr,
+                      ForcedVersion
+                  )
+              );
+
+              cctor.Body.Instructions.Add(
+                  Instruction.Create(
+                      OpCodes.Stsfld,
+                      unityVersionField
+                  )
+              );
+
+              cctor.Body.Instructions.Add(
+                  Instruction.Create(
+                      OpCodes.Ret
+                  )
+              );
+          }
+          else
+          {
+              var processor =
+                  cctor.Body.GetILProcessor();
+
+              var rets =
+                  cctor.Body.Instructions
+                      .Where(
+                          i => i.OpCode == OpCodes.Ret
+                      )
+                      .ToList();
+
+              foreach (var ret in rets)
+              {
+                  processor.InsertBefore(
+                      ret,
+                      Instruction.Create(
+                          OpCodes.Ldstr,
+                          ForcedVersion
+                      )
+                  );
+
+                  processor.InsertBefore(
+                      ret,
+                      Instruction.Create(
+                          OpCodes.Stsfld,
+                          unityVersionField
+                      )
+                  );
+              }
+          }
+
+          assembly.Write(dllPath);
+
+          Console.WriteLine(
+              "SUCCESS: forced Unity version = "
+              + ForcedVersion
+          );
+
+          return 0;
+          EOF
+
+          dotnet run \
+            --project unity_version_patcher/unity_version_patcher.csproj \
+            -c Release \
+            -- "$MELON_DLL"
+
+          echo "Repacking melon_data_gcfix.zip..."
+
+          rm melon_data_gcfix.zip
+
+          (
+            cd melon_force_unity
+            zip -qr ../melon_data_gcfix.zip .
+          )
+
+          echo "Unity version patch complete."
+          ls -lh melon_data_gcfix.zip 
 
       - name: Patch installer to use bundled GC-fix
         shell: bash
