@@ -73,6 +73,28 @@ jobs:
           cd installer
           git checkout "$INSTALLER_COMMIT"
 
+      - name: Force China Unity dependencies for Tale of Immortal
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("installer/Core/PatchSteps/DownloadUnityDeps.cs")
+          s = p.read_text(encoding="utf-8-sig")
+
+          old = """string url = patcher.Args.UnityVersion.Value.Type == AssetRipper.Primitives.UnityVersionType.China ? CHINA_LIBUNITY_URL_TEMPLATE : LIBUNITY_URL_TEMPLATE;"""
+
+          new = """string url = CHINA_LIBUNITY_URL_TEMPLATE;"""
+
+          if old not in s:
+              raise SystemExit("Unity dependency selector not found")
+
+          s = s.replace(old, new)
+
+          p.write_text(s, encoding="utf-8")
+          print("Forced China Unity dependencies")
+          PY
+
       - name: Build fixed JNISharp as net35
         shell: bash
         run: |
