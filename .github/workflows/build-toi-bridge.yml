@@ -1,0 +1,100 @@
+name: Build TOI Android Bridge From ZIP
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Check BuildKit ZIP
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -f TOI_Android_Bridge_GitHub_BuildKit.zip
+          ls -lh TOI_Android_Bridge_GitHub_BuildKit.zip
+
+      - name: Extract BuildKit
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf buildkit
+          mkdir buildkit
+          unzip -q TOI_Android_Bridge_GitHub_BuildKit.zip -d buildkit
+
+          ROOT="buildkit/toi_bridge_buildkit"
+          test -f "$ROOT/TOI_bridge_refs.zip"
+          test -f "$ROOT/bridge/GGBH_MOD_Android.csproj"
+          test -f "$ROOT/patcher/Patcher.csproj"
+          test -f "$ROOT/input/MOD_ncNhZv.dll"
+
+      - name: Extract Android generated references
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ROOT="buildkit/toi_bridge_buildkit"
+          rm -rf "$ROOT/refs"
+          mkdir -p "$ROOT/refs"
+          unzip -q "$ROOT/TOI_bridge_refs.zip" -d "$ROOT/refs"
+
+          test -f "$ROOT/refs/MelonLoader/Il2CppAssemblies/Assembly-CSharp.dll"
+          test -f "$ROOT/refs/MelonLoader/Il2CppAssemblies/Il2Cppmscorlib.dll"
+          test -f "$ROOT/refs/MelonLoader/Il2CppAssemblies/Il2CppSystem.dll"
+          test -f "$ROOT/refs/MelonLoader/Il2CppAssemblies/UnityEngine.CoreModule.dll"
+          test -f "$ROOT/refs/MelonLoader/net8/MelonLoader.dll"
+          test -f "$ROOT/refs/MelonLoader/net8/0Harmony.dll"
+          test -f "$ROOT/refs/MelonLoader/net8/Il2CppInterop.Runtime.dll"
+          test -f "$ROOT/refs/MelonLoader/net8/Il2CppInterop.Common.dll"
+
+      - name: Build GGBH_MOD Android bridge
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ROOT="buildkit/toi_bridge_buildkit"
+          dotnet build "$ROOT/bridge/GGBH_MOD_Android.csproj" -c Release
+
+      - name: Patch MOD_ncNhZv for Il2CppInterop
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ROOT="buildkit/toi_bridge_buildkit"
+          mkdir -p "$ROOT/out"
+
+          dotnet run --project "$ROOT/patcher/Patcher.csproj" -c Release -- \
+            "$ROOT/input/MOD_ncNhZv.dll" \
+            "$ROOT/refs/MelonLoader/Il2CppAssemblies/Assembly-CSharp.dll" \
+            "$ROOT/refs/MelonLoader/net8/Il2CppInterop.Runtime.dll" \
+            "$ROOT/out/MOD_ncNhZv.dll"
+
+      - name: Collect output
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ROOT="buildkit/toi_bridge_buildkit"
+
+          cp \
+            "$ROOT/bridge/bin/Release/net8.0/GGBH_MOD_Android.dll" \
+            "$ROOT/out/GGBH_MOD_Android.dll"
+
+          sha256sum "$ROOT/out"/*.dll | tee "$ROOT/out/SHA256SUMS.txt"
+          ls -lh "$ROOT/out"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TOI-Android-Bridge
+          path: buildkit/toi_bridge_buildkit/out/
+          if-no-files-found: error
