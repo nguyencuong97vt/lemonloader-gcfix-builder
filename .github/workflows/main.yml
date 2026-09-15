@@ -208,7 +208,7 @@ jobs:
               return 1;
           }
 
-          const string ForcedVersion = "2022.3.62f2c1";
+          const string ForcedVersion = "2022.3.62f2";
 
           string dllPath = args[0];
 
