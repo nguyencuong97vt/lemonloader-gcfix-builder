@@ -73,7 +73,7 @@ jobs:
           cd installer
           git checkout "$INSTALLER_COMMIT"
 
-      - name: Build fixed JNISharp
+      - name: Build fixed JNISharp as net35
         shell: bash
         run: |
           git clone https://github.com/LemonLoader/JNISharp.git jnisharp
@@ -86,13 +86,20 @@ jobs:
           p = Path("JNISharp/JNISharp.csproj")
           s = p.read_text(encoding="utf-8-sig")
 
-          old = "<TargetFramework>net35</TargetFramework>"
-          if old not in s:
-              raise SystemExit("Expected net35 TargetFramework not found")
+          if "<TargetFramework>net35</TargetFramework>" not in s:
+              raise SystemExit("net35 target not found")
+
+          package = """
+            <ItemGroup>
+              <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net35"
+                                Version="1.0.3"
+                                PrivateAssets="All" />
+            </ItemGroup>
+          """
 
           s = s.replace(
-              old,
-              "<TargetFramework>net8.0</TargetFramework>"
+              "</Project>",
+              package + "\n</Project>"
           )
 
           p.write_text(s, encoding="utf-8")
@@ -101,7 +108,7 @@ jobs:
           dotnet build JNISharp/JNISharp.csproj -c Release
 
           test -f \
-          JNISharp/bin/Release/net8.0/JNISharp.dll
+            JNISharp/bin/Release/net35/JNISharp.dll
 
       - name: Build GC-fix melon_data
         shell: bash
@@ -132,7 +139,7 @@ jobs:
             "$OLD.official_${BASE_MELON_VERSION}.bak"
 
           cp \
-            ../jnisharp/JNISharp/bin/Release/net8.0/JNISharp.dll \
+            ../jnisharp/JNISharp/bin/Release/net35/JNISharp.dll \
             "$OLD"
 
           cat > COMMUNITY_BUILD_INFO.txt <<EOF
